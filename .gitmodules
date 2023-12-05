@@ -1,0 +1,3 @@
+[submodule "sem_6/databases/music_thing"]
+	path = sem_6/databases/music_thing
+	url = https://github.com/blin-alt-delatb-4toli/music-thingy.git
