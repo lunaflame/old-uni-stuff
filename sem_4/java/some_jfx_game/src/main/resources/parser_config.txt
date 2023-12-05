@@ -1,0 +1,9 @@
+\==cells.Wall
+*=cells.Dot
+O=cells.Dot
+X=cells.HouseEntrance
+P=entities.Pacman
+1=entities.ghosts.BruhGhost
+2=entities.ghosts.Inky
+3=entities.ghosts.Pinky
+4=entities.ghosts.Blinky
