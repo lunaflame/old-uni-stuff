@@ -60,17 +60,10 @@ func main() {
 
 	// Create all Servers in this cluster, assign ids and peer ids.
 	for i := 0; i < main.NumServers; i++ {
-		peerIds := make([]int, 0)
-		for p := 0; p < main.NumServers; p++ {
-			if p != i {
-				peerIds = append(peerIds, p)
-			}
-		}
-
 		commitChans[i] = make(chan raft.CommitEntry)
 
 		var storage = getRoseStorage(i, true)
-		main.servers[i] = raft.NewServer(i, peerIds, ready, commitChans[i], storage)
+		main.servers[i] = raft.NewServer(i, ready, commitChans[i], storage)
 		main.servers[i].Serve()
 
 		values[i] = make(map[string]string)
@@ -210,18 +203,11 @@ func main() {
 				continue
 			}
 
-			peerIds := make([]int, 0)
-			for p := 0; p < main.NumServers; p++ {
-				if p != n {
-					peerIds = append(peerIds, p)
-				}
-			}
-
 			newReady := make(chan interface{})
 			values[n] = make(map[string]string)
 			commitChans[n] = make(chan raft.CommitEntry)
 
-			main.servers[n] = raft.NewServer(n, peerIds, newReady, commitChans[n], getRoseStorage(n, false))
+			main.servers[n] = raft.NewServer(n, newReady, commitChans[n], getRoseStorage(n, false))
 			main.servers[n].Serve()
 
 			go main.collectIntoMap(&commitChans[n], values[n])

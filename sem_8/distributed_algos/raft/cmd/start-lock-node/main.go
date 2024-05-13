@@ -10,6 +10,7 @@ import (
 	"os"
 	"raft"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,9 +18,19 @@ import (
 import "github.com/rosedblabs/rosedb/v2"
 
 type Main struct {
-	servers    []*raft.Server
+	nodes      []*Node
 	NumServers int
 	mtx        sync.Mutex
+}
+
+type Node struct {
+	server     *raft.Server
+	commitChan chan raft.CommitEntry
+	locks      map[string]LockData
+	values     map[string]string
+
+	lockWaiting bool
+	lockChan    chan bool
 }
 
 func getRoseStorage(id int, wipe bool) *raft.RoseStorage {
@@ -56,56 +67,64 @@ func main() {
 	main := new(Main)
 	main.NumServers = 3
 
-	main.servers = make([]*raft.Server, main.NumServers)
+	main.nodes = make([]*Node, main.NumServers)
 	ready := make(chan interface{})
-	commitChans := make([]chan raft.CommitEntry, main.NumServers)
-	locks := make([]map[string]bool, main.NumServers)
 
-	// Create all Servers in this cluster, assign ids and peer ids.
 	for i := 0; i < main.NumServers; i++ {
-		peerIds := make([]int, 0)
-		for p := 0; p < main.NumServers; p++ {
-			if p != i {
-				peerIds = append(peerIds, p)
-			}
-		}
-
-		commitChans[i] = make(chan raft.CommitEntry)
-
 		var storage = getRoseStorage(i, true)
-		main.servers[i] = raft.NewServer(i, peerIds, ready, commitChans[i], storage)
-		main.servers[i].Serve()
+		var node = newNode()
 
-		locks[i] = make(map[string]bool)
-		go main.collectLocks(&commitChans[i], locks[i])
+		main.nodes[i] = node
+		node.server = raft.NewServer(i, ready, node.commitChan, storage)
+		node.server.Serve()
+
+		go main.collectLocks(node.commitChan, main.nodes[i])
 	}
 
 	// Connect all peers to each other.
 	for i := 0; i < main.NumServers; i++ {
 		for j := 0; j < main.NumServers; j++ {
 			if i != j {
-				main.servers[i].ConnectToPeer(j, main.servers[j].GetListenAddr())
+				main.nodes[i].server.ConnectToPeer(j, main.nodes[j].server.GetListenAddr())
 			}
 		}
 	}
 
+	inputQueue := fifo.NewQueue()
+	commandChans := make([]chan interface{}, 0)
+
+	for i := 0; i < main.NumServers; i++ {
+		log.Printf("%d waiting for command\n", i)
+		commandChans = append(commandChans, make(chan interface{}))
+		i := i // CERTIFIED HOOD CLASSIC
+
+		go func() {
+			// Бесконечно вытаскиваем команды из канала для обработки в отдельной горутине
+			// Сделано для того, чтобы поданная команда не блокировала (в случае блокировки, например)
+			for cmd := range commandChans[i] {
+				main.processCommand(main.nodes[i], cmd)
+			}
+		}()
+	}
+
 	close(ready)
+
 	fmt.Println("Servers spun up, accepting input now")
 	fmt.Println("set -> Set Key/Value")
+	fmt.Println("lock -> Lock")
+	fmt.Println("unlock -> Unlock")
 	fmt.Println("k, kill -> Shutdown a node")
 	fmt.Println("s, status -> Every node's status")
 	fmt.Println("q, quit -> Quit")
 	fmt.Println("auto -> auto case")
 
-	// yeah im using a library for a fifo queue. gonna cry abt it?
-	commandQueue := fifo.NewQueue()
 	var valIdx = 0
 
 	for {
-		var in = readQueueOrStdin(commandQueue)
+		var in = readQueueOrStdin(inputQueue)
 
 		if in == "wait" {
-			var durStr = readQueueOrStdin(commandQueue)
+			var durStr = readQueueOrStdin(inputQueue)
 			var dur, _ = strconv.Atoi(durStr)
 
 			fmt.Println("/// Waiting... ///")
@@ -126,36 +145,36 @@ func main() {
 			}
 
 			// Leader broadcasts entries every 100ms (+ "ping"), so make sure you wait for slightly more than that
-			commandQueue.Add("set")
-			commandQueue.Add("key")
-			commandQueue.Add(fmt.Sprintf("value%d", valIdx))
+			inputQueue.Add("set")
+			inputQueue.Add("key")
+			inputQueue.Add(fmt.Sprintf("value%d", valIdx))
 			valIdx++
 
-			commandQueue.Add("set")
-			commandQueue.Add("key")
-			commandQueue.Add(fmt.Sprintf("value%d", valIdx))
+			inputQueue.Add("set")
+			inputQueue.Add("key")
+			inputQueue.Add(fmt.Sprintf("value%d", valIdx))
 			valIdx++
 
 			// let RPC work
-			commandQueue.Add("wait")
-			commandQueue.Add("200")
+			inputQueue.Add("wait")
+			inputQueue.Add("200")
 
-			commandQueue.Add("get")
-			commandQueue.Add(fmt.Sprintf("%d", nonLeaderIdx))
-			commandQueue.Add("key")
+			inputQueue.Add("get")
+			inputQueue.Add(fmt.Sprintf("%d", nonLeaderIdx))
+			inputQueue.Add("key")
 
-			commandQueue.Add("kill")
-			commandQueue.Add(fmt.Sprintf("%d", nonLeaderIdx))
+			inputQueue.Add("kill")
+			inputQueue.Add(fmt.Sprintf("%d", nonLeaderIdx))
 
-			commandQueue.Add("restart")
-			commandQueue.Add(fmt.Sprintf("%d", nonLeaderIdx))
+			inputQueue.Add("restart")
+			inputQueue.Add(fmt.Sprintf("%d", nonLeaderIdx))
 
-			commandQueue.Add("wait")
-			commandQueue.Add("200")
+			inputQueue.Add("wait")
+			inputQueue.Add("200")
 
-			commandQueue.Add("get")
-			commandQueue.Add(fmt.Sprintf("%d", nonLeaderIdx))
-			commandQueue.Add("key")
+			inputQueue.Add("get")
+			inputQueue.Add(fmt.Sprintf("%d", nonLeaderIdx))
+			inputQueue.Add("key")
 			continue
 		}
 
@@ -166,6 +185,14 @@ func main() {
 
 		if in == "lock" || in == "unlock" {
 			var isLock = in == "lock"
+			fmt.Printf("Node #")
+			idx, _ := strconv.Atoi(readQueueOrStdin(inputQueue))
+
+			if idx < 0 || idx > main.NumServers {
+				fmt.Printf("out of range (%d > %d)\n", idx, main.NumServers)
+				continue
+			}
+
 			if isLock {
 				fmt.Printf("Locking: ")
 			} else {
@@ -173,104 +200,154 @@ func main() {
 			}
 
 			var key string
-			key = readQueueOrStdin(commandQueue)
+			key = readQueueOrStdin(inputQueue)
 
-			var idx, _ = main.findLeader()
-			if idx == -1 {
-				fmt.Printf("No leader; cannot lock.\n")
+			commandChans[idx] <- LockCommand{
+				LockName: key,
+				LockedBy: idx,
+				NewState: isLock,
+				LockTime: time.Now().UnixMilli(),
+			}
+			continue
+		}
+
+		if in == "set" {
+			fmt.Printf("Node #")
+			idx, _ := strconv.Atoi(readQueueOrStdin(inputQueue))
+
+			if idx < 0 || idx > main.NumServers {
+				fmt.Printf("out of range (%d > %d)\n", idx, main.NumServers)
 				continue
 			}
 
-			main.servers[idx].SubmitCommand(LockCommand{
-				LockName: key,
-				NewState: isLock,
-			})
+			fmt.Printf("Key/Value: ")
+			key := readQueueOrStdin(inputQueue)
+
+			fmt.Print(" = ")
+			value := readQueueOrStdin(inputQueue)
+
+			commandChans[idx] <- DictCommand{
+				Key:   key,
+				Value: value,
+			}
+
+			continue
+		}
+
+		if in == "lockset" || in == "ls" {
+			fmt.Printf("Node #")
+			idx, _ := strconv.Atoi(readQueueOrStdin(inputQueue))
+
+			if idx < 0 || idx > main.NumServers {
+				fmt.Printf("out of range (%d > %d)\n", idx, main.NumServers)
+				continue
+			}
+
+			fmt.Printf("Lock name: ")
+			ln := readQueueOrStdin(inputQueue)
+
+			lc := LockCommand{
+				LockName: ln,
+				LockedBy: idx,
+				NewState: true,
+				LockTime: time.Now().UnixMilli(),
+			}
+
+			fmt.Printf("Trying to lock %s...\n", ln)
+			if !main.tryLock(main.nodes[idx], lc) {
+				fmt.Printf("Node couldn't lock, bailing!\n")
+				continue
+			}
+
+			fmt.Printf("Key/Value: ")
+			key := readQueueOrStdin(inputQueue)
+
+			fmt.Print(" = ")
+			value := readQueueOrStdin(inputQueue)
+
+			commandChans[idx] <- DictCommand{
+				Key:   key,
+				Value: value,
+			}
+
+			lc.NewState = false
+			main.tryLock(main.nodes[idx], lc) // unlock
+
 			continue
 		}
 
 		if in == "g" || in == "get" {
-			fmt.Printf("Getting lock from Node #")
-			var idx int
-			var key string
-			idx, _ = strconv.Atoi(readQueueOrStdin(commandQueue))
+			fmt.Printf("Getting value from Node #")
+			idx, _ := strconv.Atoi(readQueueOrStdin(inputQueue))
 
-			if idx > main.NumServers {
+			if idx < 0 || idx > main.NumServers {
 				fmt.Printf("NOPE")
 				continue
 			}
 
 			fmt.Printf("Key: ")
-			key = readQueueOrStdin(commandQueue)
+			key := readQueueOrStdin(inputQueue)
 
-			go_is_an_abomination := "Locked"
-			if !locks[idx][key] {
-				go_is_an_abomination = "Unlocked"
-			}
-
-			fmt.Printf("%s is %s\n", key, go_is_an_abomination)
+			fmt.Printf("map[%s] = \"%s\"\n", key, main.nodes[idx].values[key])
 			continue
 		}
 
 		if in == "r" || in == "restart" {
 			fmt.Printf("Restart node: #")
-			var n int
-			n, _ = strconv.Atoi(readQueueOrStdin(commandQueue))
+			idx, _ := strconv.Atoi(readQueueOrStdin(inputQueue))
 
-			if n > main.NumServers {
-				fmt.Printf("out of range (%d > %d)\n", n, main.NumServers)
-				continue
+			if idx < 0 || idx > main.NumServers {
+				fmt.Printf("Index out of range!")
+				return
 			}
 
-			peerIds := make([]int, 0)
-			for p := 0; p < main.NumServers; p++ {
-				if p != n {
-					peerIds = append(peerIds, p)
-				}
-			}
-
-			newReady := make(chan interface{})
-			locks[n] = make(map[string]bool)
-			commitChans[n] = make(chan raft.CommitEntry)
-
-			main.servers[n] = raft.NewServer(n, peerIds, newReady, commitChans[n], getRoseStorage(n, false))
-			main.servers[n].Serve()
-
-			go main.collectLocks(&commitChans[n], locks[n])
-
-			for j := 0; j < main.NumServers; j++ {
-				if n != j && main.servers[j].State != raft.Dead {
-					if err := main.servers[n].ConnectToPeer(j, main.servers[j].GetListenAddr()); err != nil {
-						log.Fatal(err)
-					}
-					if err := main.servers[j].ConnectToPeer(n, main.servers[n].GetListenAddr()); err != nil {
-						log.Fatal(err)
-					}
-				}
-			}
-
-			close(newReady)
-
+			main.addNode(idx)
 			continue
 		}
 
 		if in == "k" || in == "kill" {
 			fmt.Printf("Killing node: #")
-			var n int
-			n, _ = strconv.Atoi(readQueueOrStdin(commandQueue))
+			idx, _ := strconv.Atoi(readQueueOrStdin(inputQueue))
 
-			if n > main.NumServers {
-				fmt.Printf("out of range (%d > %d)\n", n, main.NumServers)
-				continue
+			main.stopNode(idx)
+			continue
+		}
+
+		if in == "add" {
+			fmt.Printf("Adding node...")
+			main.addNode(main.NumServers)
+			continue
+		}
+
+		if in == "remove" {
+			fmt.Printf("Removing node #")
+			var n int
+			n, _ = strconv.Atoi(readQueueOrStdin(inputQueue))
+
+			if n < 0 || n > main.NumServers {
+				fmt.Printf("Index out of range!")
+				return
 			}
 
-			main.servers[n].Shutdown()
-			close(commitChans[n])
+			main.removeNode(n)
 			continue
 		}
 
 		if in == "s" || in == "status" {
 			for i := 0; i < main.NumServers; i++ {
-				fmt.Printf("[%d] state = %s\n", i, main.servers[i].State)
+				node := main.nodes[i]
+				var sb strings.Builder
+				var now = time.Now().UnixMilli()
+
+				for lockName, lock := range node.locks {
+					if lock.LockedBy == i {
+						sb.WriteString(lockName)
+						sb.WriteString(fmt.Sprintf(" (%.1fs./%ds. ago)", float64((now-lock.LockTime))/1000, LockTimeout/1000))
+					}
+				}
+
+				fmt.Printf("[%d] state = %v (blocked = %v, locks = %s)\n", i, node.server.State,
+					node.lockWaiting, sb.String())
 			}
 			continue
 		}
@@ -285,7 +362,7 @@ func (m *Main) findLeader() (int, int) {
 		leaderId := -1
 		leaderTerm := -1
 		for i := 0; i < m.NumServers; i++ {
-			_, term, isLeader := m.servers[i].Status()
+			_, term, isLeader := m.nodes[i].server.Status()
 			if isLeader {
 				if leaderId < 0 {
 					leaderId = i

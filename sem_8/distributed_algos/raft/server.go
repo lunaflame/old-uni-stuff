@@ -11,9 +11,9 @@ import (
 type Server struct {
 	mtx sync.Mutex
 
-	Id      int
-	PeerIds []int
-	State   ServerState
+	Id int
+	// Роль PeerIds выполняет peerRPCs
+	State ServerState
 
 	// Persistent, т.е. должно быть сохранено
 	Term     int
@@ -28,8 +28,9 @@ type Server struct {
 	lastAppliedIndex int
 
 	// Серверные (лидерные) индексы: [PeerId] = index
-	nextIndex  map[int]int
-	matchIndex map[int]int
+	nextIndex     map[int]int
+	matchIndex    map[int]int
+	votesReceived int
 
 	// Канал для клиента, через который имплементация будет гонять свою логику
 	commitChan chan<- CommitEntry
@@ -49,12 +50,11 @@ type Server struct {
 	quit chan interface{}
 }
 
-func NewServer(id int, peerIds []int, ready <-chan interface{},
+func NewServer(id int, ready <-chan interface{},
 	commitChan chan<- CommitEntry, storage Storage) *Server {
 
 	ret := &Server{
 		Id:       id,
-		PeerIds:  peerIds,
 		State:    Follower,
 		peerRPCs: map[int]*rpc.Client{},
 		Term:     0,
@@ -79,7 +79,7 @@ func NewServer(id int, peerIds []int, ready <-chan interface{},
 	}
 
 	go func() {
-		// Блокируем, пока не получим сигнал от ready
+		// Не пытаемся стать лидером, пока не получим сигнал от ready
 		<-ready
 		ret.mtx.Lock()
 		ret.lastElectionReset = time.Now()
@@ -160,6 +160,7 @@ func (sv *Server) ConnectToPeer(peerId int, addr net.Addr) error {
 		log.Printf("error during connect %s\n", err)
 		return err
 	}
+
 	sv.peerRPCs[peerId] = client
 	return nil
 }
