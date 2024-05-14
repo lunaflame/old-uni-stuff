@@ -7,7 +7,8 @@ import (
 
 func newNode() *Node {
 	return &Node{
-		commitChan: make(chan raft.CommitEntry),
+		commitChan:  make(chan raft.CommitEntry),
+		receiveChan: make(chan raft.CommitEntry),
 
 		locks:    map[string]LockData{},
 		values:   map[string]string{},
@@ -20,15 +21,16 @@ func (node *Node) Stop() {
 	close(node.commitChan)
 }
 
-func (main *Main) addNode(idx int) *Node {
+func (main *Main) createDisconnectedNode(idx int) (*Node, chan interface{}) {
 	if idx < 0 || idx > main.NumServers {
 		log.Fatalf("addNode: index out of range (%d not in %d-%d)\n", idx, 0, main.NumServers)
-		return nil
+		return nil, nil
 	}
 
 	readyChan := make(chan interface{})
 
 	var node = newNode()
+	node.index = idx
 	isFirst := false
 
 	if idx == main.NumServers {
@@ -39,17 +41,33 @@ func (main *Main) addNode(idx int) *Node {
 		main.nodes[idx] = node
 	}
 
-	main.nodes[idx].server = raft.NewServer(idx, readyChan, node.commitChan, getRoseStorage(idx, isFirst))
+	main.nodes[idx].server = raft.NewServer(main.CurrentId, readyChan,
+		node.commitChan, node.receiveChan, getRoseStorage(main.CurrentId, isFirst))
+	main.CurrentId++
 	main.nodes[idx].server.Serve()
 
 	go main.collectLocks(node.commitChan, main.nodes[idx])
+	go main.collectReconfig(node.receiveChan, main.nodes[idx])
+
+	return main.nodes[idx], readyChan
+}
+
+func (main *Main) addNode(idx int) *Node {
+	if idx < 0 || idx > main.NumServers {
+		log.Fatalf("addNode: index out of range (%d not in %d-%d)\n", idx, 0, main.NumServers)
+		return nil
+	}
+
+	node, readyChan := main.createDisconnectedNode(idx)
 
 	for j := 0; j < main.NumServers; j++ {
-		if idx != j && main.nodes[j].server.State != raft.Dead {
-			if err := main.nodes[idx].server.ConnectToPeer(j, main.nodes[j].server.GetListenAddr()); err != nil {
+		var otherNode = main.nodes[j]
+
+		if idx != j && otherNode.server.State != raft.Dead {
+			if err := node.server.ConnectToPeer(otherNode.server.Id, otherNode.server.GetListenAddr()); err != nil {
 				log.Fatal(err)
 			}
-			if err := main.nodes[j].server.ConnectToPeer(idx, main.nodes[idx].server.GetListenAddr()); err != nil {
+			if err := otherNode.server.ConnectToPeer(node.index, node.server.GetListenAddr()); err != nil {
 				log.Fatal(err)
 			}
 		}
@@ -57,7 +75,7 @@ func (main *Main) addNode(idx int) *Node {
 
 	close(readyChan)
 
-	return main.nodes[idx]
+	return node
 }
 
 func (main *Main) stopNode(idx int) {
@@ -73,15 +91,27 @@ func (main *Main) stopNode(idx int) {
 	main.nodes[idx].Stop()
 }
 
-func (main *Main) removeNode(idx int) {
-	if idx < 0 || idx >= main.NumServers {
-		log.Fatalf("addNode: index out of range (%d not in %d-%d)\n", idx, 0, main.NumServers)
-		return
+func (main *Main) removeNode(id int) {
+	node := main.findNodeById(id)
+	if node == nil {
+		log.Fatalf("didn't find node with id %s\n", id)
 	}
 
-	main.mtx.Lock()
-	main.stopNode(idx)
-	main.nodes = append(main.nodes[:idx], main.nodes[idx+1:]...) // WTF GO
+	main.stopNode(node.index)
+	main.nodes = append(main.nodes[:node.index], main.nodes[node.index+1:]...) // WTF GO
 	main.NumServers--
-	main.mtx.Unlock()
+
+	for idx, node := range main.nodes {
+		node.index = idx
+	}
+}
+
+func (main *Main) findNodeById(id int) *Node {
+	for _, node := range main.nodes {
+		if node.server.Id == id {
+			return node
+		}
+	}
+
+	return nil
 }

@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/rpc"
@@ -21,7 +22,8 @@ type Server struct {
 	Entries  []CommitEntry
 	storage  Storage
 
-	lastElectionReset time.Time
+	lastElectionReset    time.Time
+	lastHeartbeatReceive time.Time
 
 	// Клиентские индексы
 	commitIndex      int
@@ -34,6 +36,10 @@ type Server struct {
 
 	// Канал для клиента, через который имплементация будет гонять свою логику
 	commitChan chan<- CommitEntry
+
+	// Канал для клиента, в который идут сообщения при получении (не коммите!)
+	// В основном для реконфигурации.
+	receiveChan chan<- CommitEntry
 
 	// Внутренний канал для асинхронного эмита commitChan
 	newCommitReadyChan chan struct{}
@@ -51,7 +57,7 @@ type Server struct {
 }
 
 func NewServer(id int, ready <-chan interface{},
-	commitChan chan<- CommitEntry, storage Storage) *Server {
+	commitChan chan<- CommitEntry, receiveChan chan<- CommitEntry, storage Storage) *Server {
 
 	ret := &Server{
 		Id:       id,
@@ -69,6 +75,7 @@ func NewServer(id int, ready <-chan interface{},
 		newCommitReadyChan:    make(chan struct{}, 10),
 		sendAppendEntriesChan: make(chan struct{}, 10),
 		commitChan:            commitChan,
+		receiveChan:           receiveChan,
 		quit:                  make(chan interface{}),
 	}
 
@@ -149,6 +156,20 @@ func (sv *Server) Serve() {
 			}()
 		}
 	}()
+}
+
+func (sv *Server) DisconnectPeer(peerId int) error {
+	sv.mtx.Lock()
+	defer sv.mtx.Unlock()
+
+	if sv.peerRPCs[peerId] == nil {
+		// могли отсоединиться при проваленном RPC
+		return nil // errors.New(fmt.Sprintf("attempt to disconnect non-existent peer %v", peerId))
+	}
+
+	delete(sv.peerRPCs, peerId)
+	fmt.Printf("%v peerRPCs: %v\n", sv.Id, sv.peerRPCs)
+	return nil
 }
 
 func (sv *Server) ConnectToPeer(peerId int, addr net.Addr) error {

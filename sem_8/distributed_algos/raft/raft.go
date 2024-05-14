@@ -16,8 +16,11 @@ const (
 	Dead
 )
 
-func (sv *Server) electionTimeout() time.Duration {
+func (sv *Server) minElectionTimeout() time.Duration {
 	return time.Duration(500+rand.Intn(500)) * time.Millisecond
+}
+func (sv *Server) electionTimeout() time.Duration {
+	return sv.minElectionTimeout() + time.Duration(rand.Intn(500))*time.Millisecond
 }
 
 func (sv *Server) followerHeartbeatCheckTimer() time.Duration {
@@ -193,6 +196,7 @@ func (sv *Server) commitChanSender() {
 		sv.mtx.Unlock()
 
 		// log.Printf("Издаём %d эвентов\n", len(entries))
+
 		for i, entry := range entries {
 			// log.Printf("\tEmit #%d %s: [%s] = %s\n", sv.Id, sv.State, i, entry.Command)
 			sv.commitChan <- CommitEntry{
@@ -301,6 +305,7 @@ func (sv *Server) SubmitCommand(command interface{}) bool {
 		sv.savePersistentState()
 		sv.mtx.Unlock()
 		sv.sendAppendEntriesChan <- struct{}{}
+		sv.receiveChan <- sv.Entries[len(sv.Entries)-1]
 		return true
 	}
 

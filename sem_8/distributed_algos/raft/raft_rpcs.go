@@ -14,6 +14,13 @@ func (sv *Server) RequestVote(args RequestVotesRequest, reply *RequestVotesRespo
 	lastLogIndex, lastLogTerm := sv.lastLogIndexAndTerm()
 	vote := false
 
+	// Запрос на голос хотя наш текущий лидер всё ещё жив.
+	if time.Now().Sub(sv.lastHeartbeatReceive) < sv.minElectionTimeout() {
+		reply.Term = sv.Term
+		reply.VotedForReceiver = false
+		return
+	}
+
 	if args.Term > sv.Term {
 		sv.becomeFollower(args.Term)
 	}
@@ -50,6 +57,7 @@ func (sv *Server) AppendEntries(args AppendEntriesRequest, reply *AppendEntriesR
 		}
 
 		sv.lastElectionReset = time.Now()
+		sv.lastHeartbeatReceive = time.Now()
 
 		// Если мы получили обновление с прошлым индексом, который у нас тоже есть,
 		// и терм лидера совпадает, то мы обновляем наш лог. Иначе команда невалидна
@@ -85,6 +93,9 @@ func (sv *Server) AppendEntries(args AppendEntriesRequest, reply *AppendEntriesR
 
 			if newEntriesIndex < len(args.Entries) {
 				sv.Entries = append(sv.Entries[:logInsertIndex], args.Entries[newEntriesIndex:]...)
+				for _, entry := range args.Entries[newEntriesIndex:] {
+					sv.receiveChan <- entry
+				}
 			}
 
 			if args.LeaderCommit > sv.commitIndex {

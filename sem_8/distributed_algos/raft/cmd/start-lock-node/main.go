@@ -20,14 +20,18 @@ import "github.com/rosedblabs/rosedb/v2"
 type Main struct {
 	nodes      []*Node
 	NumServers int
+	CurrentId  int
 	mtx        sync.Mutex
 }
 
 type Node struct {
-	server     *raft.Server
-	commitChan chan raft.CommitEntry
-	locks      map[string]LockData
-	values     map[string]string
+	server      *raft.Server
+	commitChan  chan raft.CommitEntry
+	receiveChan chan raft.CommitEntry
+
+	locks  map[string]LockData
+	values map[string]string
+	index  int
 
 	lockWaiting bool
 	lockChan    chan bool
@@ -68,6 +72,7 @@ func (main *Main) addCommandHandlerChan(node *Node) chan interface{} {
 		// Бесконечно вытаскиваем команды из канала для обработки в отдельной горутине
 		// Сделано для того, чтобы поданная команда не блокировала (в случае блокировки, например)
 		for cmd := range chn {
+			fmt.Printf("command recv by %d\n", node.index)
 			main.processCommand(node, cmd)
 		}
 	}()
@@ -85,14 +90,17 @@ func main() {
 	ready := make(chan interface{})
 
 	for i := 0; i < main.NumServers; i++ {
-		var storage = getRoseStorage(i, true)
+		var storage = getRoseStorage(main.CurrentId, true)
 		var node = newNode()
+		node.index = i
 
 		main.nodes[i] = node
-		node.server = raft.NewServer(i, ready, node.commitChan, storage)
+		node.server = raft.NewServer(main.CurrentId, ready, node.commitChan, node.receiveChan, storage)
+		main.CurrentId++
 		node.server.Serve()
 
 		go main.collectLocks(node.commitChan, main.nodes[i])
+		go main.collectReconfig(node.receiveChan, main.nodes[i])
 	}
 
 	// Connect all peers to each other.
@@ -305,6 +313,11 @@ func main() {
 				return
 			}
 
+			if main.nodes[idx].server.State != raft.Dead {
+				fmt.Printf("Node isn't dead to restart\n")
+				continue
+			}
+
 			node := main.addNode(idx)
 			commandChans[idx] = main.addCommandHandlerChan(node)
 			continue
@@ -320,28 +333,42 @@ func main() {
 
 		if in == "add" {
 			fmt.Printf("Adding node...")
-			node := main.addNode(main.NumServers)
-			if len(commandChans) > node.server.Id {
+			node, readyChan := main.createDisconnectedNode(main.NumServers)
+
+			if len(commandChans) > node.index {
 				// i hate go i hate go i hate go i hate go
-				commandChans[node.server.Id] = main.addCommandHandlerChan(node)
+				commandChans[node.index] = main.addCommandHandlerChan(node)
 			} else {
 				commandChans = append(commandChans, main.addCommandHandlerChan(node))
+			}
+
+			close(readyChan)
+
+			commandChans[node.index] <- AddNodeCommand{
+				NodeId:   node.server.Id,
+				NodeAddr: node.server.GetListenAddr().String(),
 			}
 
 			continue
 		}
 
 		if in == "remove" {
-			fmt.Printf("Removing node #")
+			fmt.Printf("Removing node with ID: ")
 			var n int
 			n, _ = strconv.Atoi(readQueueOrStdin(inputQueue))
 
-			if n < 0 || n >= main.NumServers {
-				fmt.Printf("Index out of range!")
-				return
+			node := main.findNodeById(n)
+			if node == nil {
+				fmt.Printf("no such node")
+				continue
+			}
+			//main.removeNode(n)
+
+			fmt.Printf("command went to idx %d\n", node.index)
+			commandChans[node.index] <- RemoveNodeCommand{
+				NodeId: n,
 			}
 
-			main.removeNode(n)
 			continue
 		}
 
@@ -358,7 +385,7 @@ func main() {
 					}
 				}
 
-				fmt.Printf("[%d] state = %v (blocked = %v, locks = %s)\n", i, node.server.State,
+				fmt.Printf("[%d/%d] state = %v (blocked = %v, locks = %s)\n", i, node.server.Id, node.server.State,
 					node.lockWaiting, sb.String())
 			}
 			continue
