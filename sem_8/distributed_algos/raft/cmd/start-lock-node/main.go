@@ -344,9 +344,16 @@ func main() {
 
 			close(readyChan)
 
-			commandChans[node.index] <- AddNodeCommand{
-				NodeId:   node.server.Id,
-				NodeAddr: node.server.GetListenAddr().String(),
+			var newConfig = make([]PeerInfo, 0)
+			for _, node := range main.nodes {
+				newConfig = append(newConfig, PeerInfo{
+					NodeId:   node.server.Id,
+					NodeAddr: node.server.GetListenAddr().String(),
+				})
+			}
+
+			commandChans[node.index] <- NewConfigurationCommand{
+				NewConfiguration: newConfig,
 			}
 
 			continue
@@ -364,9 +371,20 @@ func main() {
 			}
 			//main.removeNode(n)
 
-			fmt.Printf("command went to idx %d\n", node.index)
-			commandChans[node.index] <- RemoveNodeCommand{
-				NodeId: n,
+			var newConfig = make([]PeerInfo, 0)
+			for _, node := range main.nodes {
+				if node.server.Id == n {
+					continue
+				}
+
+				newConfig = append(newConfig, PeerInfo{
+					NodeId:   node.server.Id,
+					NodeAddr: node.server.GetListenAddr().String(),
+				})
+			}
+
+			commandChans[node.index] <- NewConfigurationCommand{
+				NewConfiguration: newConfig,
 			}
 
 			continue
@@ -385,7 +403,8 @@ func main() {
 					}
 				}
 
-				fmt.Printf("[%d/%d] state = %v (blocked = %v, locks = %s)\n", i, node.server.Id, node.server.State,
+				fmt.Printf("[%d/%d] state = %v, term = %v (blocked = %v, locks = %s)\n", i, node.server.Id,
+					node.server.State, node.server.Term,
 					node.lockWaiting, sb.String())
 			}
 			continue
@@ -400,8 +419,8 @@ func (m *Main) findLeader() (int, int) {
 	for r := 0; r < 8; r++ {
 		leaderId := -1
 		leaderTerm := -1
-		for i := 0; i < m.NumServers; i++ {
-			_, term, isLeader := m.nodes[i].server.Status()
+		for i, node := range m.nodes {
+			_, term, isLeader := node.server.Status()
 			if isLeader {
 				if leaderId < 0 {
 					leaderId = i
@@ -411,6 +430,7 @@ func (m *Main) findLeader() (int, int) {
 				}
 			}
 		}
+
 		if leaderId >= 0 {
 			return leaderId, leaderTerm
 		}

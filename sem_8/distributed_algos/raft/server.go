@@ -13,7 +13,7 @@ type Server struct {
 	mtx sync.Mutex
 
 	Id int
-	// Роль PeerIds выполняет peerRPCs
+	// Роль PeerIds выполняет PeerRPCs
 	State ServerState
 
 	// Persistent, т.е. должно быть сохранено
@@ -48,7 +48,7 @@ type Server struct {
 	sendAppendEntriesChan chan struct{}
 
 	rpcServer *rpc.Server
-	peerRPCs  map[int]*rpc.Client
+	PeerRPCs  map[int]*rpc.Client
 	rpcProxy  RPCProxy
 	listener  net.Listener
 	wg        sync.WaitGroup
@@ -62,7 +62,7 @@ func NewServer(id int, ready <-chan interface{},
 	ret := &Server{
 		Id:       id,
 		State:    Follower,
-		peerRPCs: map[int]*rpc.Client{},
+		PeerRPCs: map[int]*rpc.Client{},
 		Term:     0,
 		VotedFor: -1,
 		storage:  storage,
@@ -104,7 +104,7 @@ func (sv *Server) Serve() {
 	sv.rpcServer = rpc.NewServer()
 	err := sv.rpcServer.RegisterName("Raft", &sv.rpcProxy)
 	if err != nil {
-		return
+		log.Fatal(err)
 	}
 
 	sv.listener, err = net.Listen("tcp", ":0")
@@ -162,13 +162,13 @@ func (sv *Server) DisconnectPeer(peerId int) error {
 	sv.mtx.Lock()
 	defer sv.mtx.Unlock()
 
-	if sv.peerRPCs[peerId] == nil {
+	if sv.PeerRPCs[peerId] == nil {
 		// могли отсоединиться при проваленном RPC
 		return nil // errors.New(fmt.Sprintf("attempt to disconnect non-existent peer %v", peerId))
 	}
 
-	delete(sv.peerRPCs, peerId)
-	fmt.Printf("%v peerRPCs: %v\n", sv.Id, sv.peerRPCs)
+	delete(sv.PeerRPCs, peerId)
+	fmt.Printf("%v PeerRPCs: %v\n", sv.Id, sv.PeerRPCs)
 	return nil
 }
 
@@ -182,7 +182,7 @@ func (sv *Server) ConnectToPeer(peerId int, addr net.Addr) error {
 		return err
 	}
 
-	sv.peerRPCs[peerId] = client
+	sv.PeerRPCs[peerId] = client
 	return nil
 }
 

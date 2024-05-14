@@ -11,15 +11,17 @@ func (sv *Server) RequestVote(args RequestVotesRequest, reply *RequestVotesRespo
 		return
 	}
 
-	lastLogIndex, lastLogTerm := sv.lastLogIndexAndTerm()
-	vote := false
+	// fmt.Printf("%d: reqvote from %d received; last heartbeat %v\n", sv.Id, args.CandidateId, time.Now().Sub(sv.lastHeartbeatReceive))
 
-	// Запрос на голос хотя наш текущий лидер всё ещё жив.
+	// Запрос на голос хотя наш текущий лидер всё ещё жив
 	if time.Now().Sub(sv.lastHeartbeatReceive) < sv.minElectionTimeout() {
 		reply.Term = sv.Term
 		reply.VotedForReceiver = false
 		return
 	}
+
+	lastLogIndex, lastLogTerm := sv.lastLogIndexAndTerm()
+	vote := false
 
 	if args.Term > sv.Term {
 		sv.becomeFollower(args.Term)
@@ -41,14 +43,17 @@ func (sv *Server) RequestVote(args RequestVotesRequest, reply *RequestVotesRespo
 
 func (sv *Server) AppendEntries(args AppendEntriesRequest, reply *AppendEntriesResponse) {
 	sv.mtx.Lock()
-	defer sv.mtx.Unlock()
+
 	if sv.State == Dead {
+		sv.mtx.Unlock()
 		return
 	}
 
 	if args.Term > sv.Term {
 		sv.becomeFollower(args.Term)
 	}
+
+	var newEntries []CommitEntry
 
 	reply.Success = false
 	if args.Term == sv.Term {
@@ -93,9 +98,7 @@ func (sv *Server) AppendEntries(args AppendEntriesRequest, reply *AppendEntriesR
 
 			if newEntriesIndex < len(args.Entries) {
 				sv.Entries = append(sv.Entries[:logInsertIndex], args.Entries[newEntriesIndex:]...)
-				for _, entry := range args.Entries[newEntriesIndex:] {
-					sv.receiveChan <- entry
-				}
+				newEntries = args.Entries[newEntriesIndex:]
 			}
 
 			if args.LeaderCommit > sv.commitIndex {
@@ -109,4 +112,12 @@ func (sv *Server) AppendEntries(args AppendEntriesRequest, reply *AppendEntriesR
 
 	reply.Term = sv.Term
 	sv.savePersistentState()
+	sv.mtx.Unlock()
+
+	// Полученные записи издаём вне мутекса, поскольку действия могут повторно захватить его и вызвать дедлок
+	if newEntries != nil {
+		for _, entry := range newEntries {
+			sv.receiveChan <- entry
+		}
+	}
 }

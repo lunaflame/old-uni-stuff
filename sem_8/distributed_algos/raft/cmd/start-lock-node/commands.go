@@ -19,6 +19,7 @@ func newNode() *Node {
 func (node *Node) Stop() {
 	node.server.Shutdown()
 	close(node.commitChan)
+	close(node.receiveChan)
 }
 
 func (main *Main) createDisconnectedNode(idx int) (*Node, chan interface{}) {
@@ -67,7 +68,7 @@ func (main *Main) addNode(idx int) *Node {
 			if err := node.server.ConnectToPeer(otherNode.server.Id, otherNode.server.GetListenAddr()); err != nil {
 				log.Fatal(err)
 			}
-			if err := otherNode.server.ConnectToPeer(node.index, node.server.GetListenAddr()); err != nil {
+			if err := otherNode.server.ConnectToPeer(node.server.Id, node.server.GetListenAddr()); err != nil {
 				log.Fatal(err)
 			}
 		}

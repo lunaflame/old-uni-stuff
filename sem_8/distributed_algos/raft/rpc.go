@@ -9,7 +9,7 @@ import (
 
 func (sv *Server) RPC(id int, procedureName string, args interface{}, reply interface{}) error {
 	sv.mtx.Lock()
-	peer := sv.peerRPCs[id]
+	peer := sv.PeerRPCs[id]
 	sv.mtx.Unlock()
 
 	if peer == nil {
@@ -18,7 +18,7 @@ func (sv *Server) RPC(id int, procedureName string, args interface{}, reply inte
 
 	rpcErr := peer.Call(procedureName, args, reply)
 	if rpcErr == rpc.ErrShutdown {
-		delete(sv.peerRPCs, id)
+		delete(sv.PeerRPCs, id)
 	}
 
 	return rpcErr

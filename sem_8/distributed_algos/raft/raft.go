@@ -60,7 +60,7 @@ func (sv *Server) runElectionTimer() {
 		}
 
 		if time.Since(sv.lastElectionReset) >= timeoutDuration {
-			// log.Printf("%d: %.1f passed without a heartbeat; electing!\n", sv.Id, time.Since(sv.lastElectionReset).Seconds())
+			log.Printf("%d: %.1f passed without a heartbeat; electing!\n", sv.Id, time.Since(sv.lastElectionReset).Seconds())
 			sv.startElection()
 			sv.mtx.Unlock()
 			return
@@ -89,7 +89,7 @@ func (sv *Server) startElection() {
 
 	votesReceived := 1
 
-	for peerId := range sv.peerRPCs {
+	for peerId := range sv.PeerRPCs {
 		go func(peerId int) {
 			sv.mtx.Lock()
 			savedLastLogIndex, savedLastLogTerm := sv.lastLogIndexAndTerm()
@@ -122,7 +122,7 @@ func (sv *Server) startElection() {
 					if resp.VotedForReceiver {
 						// we swindled another one bois
 						votesReceived++
-						if votesReceived*2 > len(sv.peerRPCs)+1 {
+						if votesReceived*2 > len(sv.PeerRPCs)+1 {
 							// i'm the captain now
 							sv.becomeLeader()
 							return
@@ -178,6 +178,7 @@ func (sv *Server) becomeLeader() {
 				sv.leaderBroadcastEntries()
 			}
 		}
+		sv.sendAppendEntriesChan <- struct{}{}
 	}()
 }
 
@@ -217,7 +218,7 @@ func (sv *Server) leaderBroadcastEntries() {
 	wasTerm := sv.Term
 	sv.mtx.Unlock()
 
-	for peerId := range sv.peerRPCs {
+	for peerId := range sv.PeerRPCs {
 		sv.mtx.Lock()
 
 		ni := sv.nextIndex[peerId]
@@ -249,13 +250,12 @@ func (sv *Server) leaderBroadcastEntries() {
 				log.Printf("Error in AppendEntries: %s\n", err)
 				return
 			}
-			// log.Printf("send AE to %d\n", peerId)
+			// log.Printf("AE: %d to %d\n", sv.Id, peerId)
 
 			sv.mtx.Lock()
 			defer sv.mtx.Unlock()
+
 			if reply.Term > wasTerm {
-				// Term changed *while* we were sending heartbeat
-				// this is a coup!!!
 				sv.becomeFollower(reply.Term)
 				return
 			}
@@ -271,7 +271,7 @@ func (sv *Server) leaderBroadcastEntries() {
 						// log.Printf("\t%d = %d (%d)\n", i, sv.Entries[i].Term, sv.Term)
 						if sv.Entries[i].Term <= sv.Term {
 							matchCount := 1
-							for peerId := range sv.peerRPCs {
+							for peerId := range sv.PeerRPCs {
 								if sv.matchIndex[peerId] >= i {
 									matchCount++
 								}
@@ -279,7 +279,7 @@ func (sv *Server) leaderBroadcastEntries() {
 
 							// Если больше половины реплицировали лог, то
 							// продвигаем commitIndex
-							if matchCount > len(sv.peerRPCs)/2 {
+							if matchCount > len(sv.PeerRPCs)/2 {
 								sv.commitIndex = i
 							}
 						}
